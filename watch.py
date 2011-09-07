@@ -10,6 +10,9 @@ import signal
 import fcrepo.connection
 import glob
 import zipfile
+import mimetypes
+import pprint
+import string
 from fcrepo.client import FedoraClient
 from fcrepo.connection import Connection as FedoraConnection
 from fcrepo.connection import FedoraConnectionException
@@ -29,24 +32,85 @@ def shutdown_handler(signum, frame):
 def process_zip(zip):
     pass 
 
-def bad_zip(file, directory):
+def move_zip(file, directory):
     destination = os.path.join(directory,os.path.basename(file))
     os.rename(file, destination)
 
-def validate_metadata(metadata_handle, zip, zip_file):
+def validate_metadata(metadata_handle, zipfile, zip_name):
+    # this is specific to the client
     metadata = csv.reader(metadata_handle)
     if(csv_title_row):
         metadata.next()
-
+    objects = []
     for row in metadata:
-        files = row[0].split(';')
-        for file in files:
-            if file not in zip.namelist():
-                raise WatcherException('Metadata validation failure. File %s not found in zipfile %s. metadata.csv:%d' % (file, zip_file, metadata.line_num))
+        object = {}
+        # grab a row and validate it appropriatly
+        object['files'] = row[0].split(';')
+        object['line_num'] = metadata.line_num
+        for index, file in enumerate(object['files']):
+            file = string.strip(file)
+            object['files'][index] = file
+            if file not in zipfile.namelist():
+                raise WatcherException('Metadata validation failure. File %s not found in zipfile %s. metadata.csv:%d' % (file, zip_name, metadata.line_num))
+        object['title'] = row[1]
+        object['relation'] = row[2].split(' ')
+        if len(object['relation']) != 3:
+            raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+        if object['relation'][0] not in object['files']:
+            logger.debug(object['relation'][0])
+            logger.debug(object['files'])
+            raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+        if object['relation'][2] not in object['files']:
+            logger.debug(object['relation'][2])
+            logger.debug(object['files'])
+            raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+        object['subjects'] = row[3].split(';')
+        object['keywords'] = row[4].split(';')
+        object['date'] = row[5]
+        object['spacial'] = row[6]
+        object['temporal'] = row[7]
+        roles = row[8].split(';')
+        first_names = row[9].split(';')
+        last_names = row[10].split(';')
+        if not (len(roles) == len(first_names) == len(last_names)):
+            raise WatcherException('Metadata validation failure. Length of Roles(%d), FirstNames(%d) and LastNames(%d)' 
+                'is not consistant. metadata.csv:%d' % (len(roles), len(first_names), len(last_names), object['line_num']))
+        object['people'] = []
+        for role, first, last in zip(roles, first_names, last_names):
+            person = {}
+            person['first'] = first
+            person['last'] = last
+            person['role'] = role
+            object['people'].append(person)
+        object['publisher'] = row[11]
+        object['language'] = row[12]
+        object['rights'] = row[13]
+        object['abstract'] = row[14]
+        object['significat'] = row[15]
+        object['sensitive'] = row[16]
+        object['notes'] = row[17]
+        logger.debug(object)
+        objects.append(object)
+    return objects
 
-def create_mods(metadata):
-    
-    title = metadata[1];
+def create_objects(objects, zip, client):
+
+    pretty = pprint.PrettyPrinter(indent=4)
+    for object in objects:
+
+        pid = client.getNextPID(unicode(repository_namespace))
+        logger.debug(pid)
+        logger.debug(pretty.pformat(object))
+        obj = client.createObject(pid, label=unicode(object['title']))
+
+        for file in object['files']:
+            #file_handle = zip.open(file)
+            mime,encoding = mimetypes.guess_type(file)
+            logger.debug(mime)
+            obj.addDataStream(file, zip.read(file), label=unicode(file), mimeType=unicode(mime), controlGroup=u'M')
+        
+        obj.addDataStream('METADATA', pretty.pformat(object), mimeType=u'text/plain', controlGroup=u'M')
+        logger.debug('finished processing')
 
 
 if __name__ == '__main__':
@@ -84,6 +148,7 @@ if __name__ == '__main__':
         repository_user = configp.get('Fedora', 'username')
         repository_pass = configp.get('Fedora', 'password')
         repository_url = configp.get('Fedora', 'url')
+        repository_namespace = configp.get('Fedora', 'namespace')
 
         #logging
         log_filename = configp.get('Logging', 'file')
@@ -133,6 +198,14 @@ if __name__ == '__main__':
         if e.errno != errno.EEXIST:
             raise
 
+    # create the directory for bad files if it doesn't exist
+    complete_file_directory = os.path.join(watcher_dir, 'complete')
+    try:
+        os.makedirs(complete_file_directory)
+    except OSError, e:
+        if e.errno != errno.EEXIST:
+            raise
+
     # watch a directory
     while 1:
         time.sleep (watcher_poll)
@@ -140,17 +213,22 @@ if __name__ == '__main__':
         logger.debug(zip_files)
         for zip_file in zip_files:
             try:
-                zip = zipfile.ZipFile(zip_file, mode='r', allowZip64=True)
+                zip_handle = zipfile.ZipFile(zip_file, mode='r', allowZip64=True)
+                logger.debug(zip_handle.namelist())
                 try: 
-                    if 'metadata.csv' in zip.namelist():
-                        metadata = zip.open('metadata.csv')
-                        validate_metadata(metadata, zip, os.path.basename(zip_file))
+                    if 'metadata.csv' in zip_handle.namelist():
+                        metadata = zip_handle.open('metadata.csv')
+                        objects = validate_metadata(metadata, zip_handle, os.path.basename(zip_file))
+                        create_objects(objects, zip_handle, client)
+                        move_zip(zip_file, complete_file_directory)
+                        logger.info('Completed processing %s' % zip_file)
                     else:
                         raise WatcherException("Zipfile %s doesn't contain metadata.csv" % os.path.basename(zip_file))
                 except WatcherException, e:
-                    zip.close()
+                    zip_handle.close()
                     logger.error(e.message)
-                    bad_zip(zip_file, bad_file_directory)
+                    move_zip(zip_file, bad_file_directory)
+
                     
             except (zipfile.BadZipfile, IOError), e:
                 #this will happen while file is being uploaded.
