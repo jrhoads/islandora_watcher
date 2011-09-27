@@ -18,15 +18,96 @@ from fcrepo.connection import Connection as FedoraConnection
 from fcrepo.connection import FedoraConnectionException
 from optparse import OptionParser
 
-DEFAULT_CONFIG_FILE = "watch.cfg"
-DEFAULT_WATCH_DIRECTORY = "watch"
-DEFAULT_POLL_TIME = 30
+CONFIG_FILE_NAME = "watch.cfg"
 
 def shutdown_handler(signum, frame):
     sys.exit(1)
 
-if __name__ == '__main__':
+def process_zip(zip):
+    pass 
 
+def move_zip(file, directory):
+    destination = os.path.join(directory,os.path.basename(file))
+    os.rename(file, destination)
+
+def validate_metadata(metadata_handle, zipfile, zip_name):
+    # this is specific to the client
+    metadata = csv.reader(metadata_handle)
+    if(csv_title_row):
+        metadata.next()
+    objects = []
+    for row in metadata:
+        object = {}
+        # grab a row and validate it appropriatly
+        object['files'] = row[0].split(';')
+        object['line_num'] = metadata.line_num
+        for index, file in enumerate(object['files']):
+            file = string.strip(file)
+            object['files'][index] = file
+            if file not in zipfile.namelist():
+                raise WatcherException('Metadata validation failure. File %s not found in zipfile %s. metadata.csv:%d' % (file, zip_name, metadata.line_num))
+        object['title'] = row[1]
+        object['relation'] = row[2].split(' ')
+        if len(object['relation']) != 3:
+            raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+        if object['relation'][0] not in object['files']:
+            logger.debug(object['relation'][0])
+            logger.debug(object['files'])
+            raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+        if object['relation'][2] not in object['files']:
+            logger.debug(object['relation'][2])
+            logger.debug(object['files'])
+            raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+        object['subjects'] = row[3].split(';')
+        object['keywords'] = row[4].split(';')
+        object['date'] = row[5]
+        object['spacial'] = row[6]
+        object['temporal'] = row[7]
+        roles = row[8].split(';')
+        first_names = row[9].split(';')
+        last_names = row[10].split(';')
+        if not (len(roles) == len(first_names) == len(last_names)):
+            raise WatcherException('Metadata validation failure. Length of Roles(%d), FirstNames(%d) and LastNames(%d)' 
+                'is not consistant. metadata.csv:%d' % (len(roles), len(first_names), len(last_names), object['line_num']))
+        object['people'] = []
+        for role, first, last in zip(roles, first_names, last_names):
+            person = {}
+            person['first'] = first
+            person['last'] = last
+            person['role'] = role
+            object['people'].append(person)
+        object['publisher'] = row[11]
+        object['language'] = row[12]
+        object['rights'] = row[13]
+        object['abstract'] = row[14]
+        object['significat'] = row[15]
+        object['sensitive'] = row[16]
+        object['notes'] = row[17]
+        logger.debug(object)
+        objects.append(object)
+    return objects
+
+def create_objects(objects, zip, client):
+
+    pretty = pprint.PrettyPrinter(indent=4)
+    for object in objects:
+
+        pid = client.getNextPID(unicode(repository_namespace))
+        logger.debug(pid)
+        logger.debug(pretty.pformat(object))
+        obj = client.createObject(pid, label=unicode(object['title']))
+
+        for file in object['files']:
+            #file_handle = zip.open(file)
+            mime,encoding = mimetypes.guess_type(file)
+            logger.debug(mime)
+            obj.addDataStream(file, zip.read(file), label=unicode(file), mimeType=unicode(mime), controlGroup=u'M')
+        
+        obj.addDataStream('METADATA', pretty.pformat(object), mimeType=u'text/plain', controlGroup=u'M')
+        logger.debug('finished processing')
+
+
+if __name__ == '__main__':
     # register handlers so we properly disconnect and reconnect
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
@@ -36,17 +117,8 @@ if __name__ == '__main__':
     configp = ConfigParser.SafeConfigParser()
     optionp = OptionParser()
 
-    optionp.add_option('-c', '--config-file', type = 'string', dest = 'configfile', default = DEFAULT_CONFIG_FILE,
+    optionp.add_option('-C', '--config-file', type = 'string', dest = 'configfile', default = CONFIG_FILE_NAME,
                   help = 'Path of the configuration file.')
-
-    optionp.add_option('-r', '--run-once', action = 'store_false', dest = 'watch', default = True,
-                  help = 'Run once and exit. Suitable for adding to a cronjob.')
-
-    optionp.add_option('-d', '--directory', type = 'string', dest = 'directory', default = DEFAULT_WATCH_DIRECTORY,
-                  help = 'Directory to run the batch ingestor on.')
-
-    optionp.add_option('-p', '--poll-time', type = 'int', dest = 'poll_time', default = DEFAULT_POLL_TIME,
-                  help = 'The amount of time in seconds between directory polling.')
 
     (options, args) = optionp.parse_args()
 
