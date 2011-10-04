@@ -1,18 +1,18 @@
 [DirectoryWatcher]
 poll_time=3
-directory=/home/jgreen/watch/thewatcher
+directory=watched_directory
 
 [CSV]
 title_row=true
 
 [Fedora]
-url=http://bella2.jwa.org:8080/fedora
+url=http://localhost:8080/fedora
 username=fedoraAdmin
-password=Ch@ng3M3
+password=fedoraAdmin
 namespace=test
 
 [Logging]
 level=DEBUG
-file=/home/jgreen/watch/watcher.log
+file=watcher.log
 max_size=10485760
 backup=5
