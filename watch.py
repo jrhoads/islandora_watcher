@@ -13,12 +13,118 @@ import zipfile
 import mimetypes
 import pprint
 import string
+from lxml import etree
+from fcrepo.utils import NS
 from fcrepo.client import FedoraClient
 from fcrepo.connection import Connection as FedoraConnection
 from fcrepo.connection import FedoraConnectionException
 from optparse import OptionParser
+from islandoraUtils.fedoraLib import mangle_dsid
 
 CONFIG_FILE_NAME = "watch.cfg"
+NS['fedoramodel'] = u"info:fedora/fedora-system:def/model#"
+
+
+def create_mods(metadata):
+    XSI_NAMESPACE = 'http://www.w3.org/2001/XMLSchema-instance'
+    XSI = "{%s}" % XSI_NAMESPACE
+    NSMAP = {None : "http://www.loc.gov/mods/v3", "xsi" : "http://www.w3.org/2001/XMLSchema-instance"} 
+
+    mods = etree.Element('mods', nsmap = NSMAP)
+    mods.set('version', '3.4')
+    mods.set(XSI+'schemaLocation', 'http://www.loc.gov/mods/v3 http://www.loc.gov/standards/mods/v3/mods-3-4.xsd')
+
+    titleInfo = etree.SubElement(mods, 'titleInfo')
+    title = etree.SubElement(titleInfo, 'title')
+    title.text = metadata['title']
+
+    for subject_text in metadata['subjects']:
+        subject = etree.SubElement(mods, 'subject')
+        name = etree.SubElement(subject, 'name')
+        name.text = subject_text
+
+    for keyword in metadata['keywords']:
+        subject = etree.SubElement(mods, 'subject')
+        topic = etree.SubElement(subject, 'topic')
+        topic.text = keyword
+
+    originInfo = etree.SubElement(mods,'originInfo')
+    dateCreated = etree.SubElement(originInfo, 'dateCreated')
+    dateCreated.text = metadata['date']
+
+    subject = etree.SubElement(mods, 'subject')
+    geographic = etree.SubElement(subject, 'geographic')
+    geographic.text = metadata['spacial']
+
+    subject = etree.SubElement(mods, 'subject')
+    temporal = etree.SubElement(subject, 'temporal')
+    temporal.text = metadata['temporal']
+
+    for person in metadata['people']:
+        name = etree.SubElement(mods, 'name', type='personal')
+        role = etree.SubElement(name, 'role')
+        roleTerm = etree.SubElement(role, 'roleTerm', type='text')
+        roleTerm.text = person['role']
+        namePart = etree.SubElement(name, 'namePart', type='family')
+        namePart.text = person['last']
+        namePart = etree.SubElement(name, 'namePart', type='given')
+        namePart.text = person['first']
+        namePart = etree.SubElement(name, 'namePart', type='termsOfAddress')
+        namePart.text = ''
+
+    originInfo = etree.SubElement(mods,'originInfo')
+    publisher = etree.SubElement(originInfo, 'publisher')
+    publisher.text = metadata['publisher']
+
+    accessCondition = etree.SubElement(mods, 'accessCondition')
+    accessCondition.text = metadata['rights']
+
+    language = etree.SubElement(mods, 'language')
+    languageTerm = etree.SubElement(language, 'languageTerm', type='text')
+    languageTerm.text = metadata['language']
+
+    abstract = etree.SubElement(mods, 'abstract')
+    abstract.text = metadata['abstract']
+
+    note = etree.SubElement(mods, 'note')
+    note.text = metadata['notes']
+
+    note = etree.SubElement(mods, 'note', displayLabel='Significant Passages')
+    note.text = metadata['significant']
+
+    note = etree.SubElement(mods, 'note', displayLabel='Sensitive Passages')
+    note.text = metadata['sensitive']
+
+    typeOfResource = etree.SubElement(mods, 'typeOfResource')
+    typeOfResource.text = metadata['model']
+
+    return etree.tostring(mods, pretty_print=True)
+
+def create_playlist(datastreams, pid):
+    JWPLAYER_NAMESPACE = 'http://developer.longtailvideo.com/trac/'
+    JWP = "{%s}" % JWPLAYER_NAMESPACE
+    NSMAP = { 'jwplayer' : JWPLAYER_NAMESPACE}
+    rss = etree.Element('rss', nsmap = NSMAP)
+    rss.set('version','2.0')
+    channel = etree.SubElement(rss, 'channel')
+    ptitle = etree.SubElement(channel, 'title')
+    ptitle.text = 'Playlist'   
+ 
+    image = '/fedora/repository/' + pid + '/TN'
+        
+    for number, ds in enumerate(datastreams):
+        title = 'Part %d' % (number + 1)
+        file = '/fedora/repository/' + pid + '/' + ds['dsid']
+
+        item = etree.SubElement(channel, 'item')
+        ititle = etree.SubElement(item, 'title')
+        ititle.text = title 
+        ifile = etree.SubElement(item, JWP + 'file')
+        ifile.text = file
+        iimage = etree.SubElement(item, JWP + 'image')
+        iimage.text = image
+
+    return etree.tostring(rss, pretty_print=True)
 
 class WatcherException(Exception):
     def __init__(self, message):
@@ -53,17 +159,20 @@ def validate_metadata(metadata_handle, zipfile, zip_name):
             if file not in zipfile.namelist():
                 raise WatcherException('Metadata validation failure. File %s not found in zipfile %s. metadata.csv:%d' % (file, zip_name, metadata.line_num))
         object['title'] = row[1]
-        object['relation'] = row[2].split(' ')
-        if len(object['relation']) != 3:
-            raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
-        if object['relation'][0] not in object['files']:
-            logger.debug(object['relation'][0])
-            logger.debug(object['files'])
-            raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
-        if object['relation'][2] not in object['files']:
-            logger.debug(object['relation'][2])
-            logger.debug(object['files'])
-            raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+        if(string.strip(row[2])):
+            object['relation'] = row[2].split(' ')
+            if len(object['relation']) != 3:
+                raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+            if object['relation'][0] not in object['files']:
+                logger.debug(object['relation'][0])
+                logger.debug(object['files'])
+                raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+            #if object['relation'][2] not in object['files']:
+            #    logger.debug(object['relation'][2])
+            #    logger.debug(object['files'])
+            #    raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
+        else:
+            object['relation'] = ''
         object['subjects'] = row[3].split(';')
         object['keywords'] = row[4].split(';')
         object['date'] = row[5]
@@ -86,9 +195,13 @@ def validate_metadata(metadata_handle, zipfile, zip_name):
         object['language'] = row[12]
         object['rights'] = row[13]
         object['abstract'] = row[14]
-        object['significat'] = row[15]
+        object['significant'] = row[15]
         object['sensitive'] = row[16]
         object['notes'] = row[17]
+        object['collection'] = row[18]
+        object['model'] = row[19]
+        if(object['model'] not in ['audio', 'document', 'image']):
+            raise WatcherException('Metadata validation failure. Model %s is not valid (Valid values are audio, document, image). metadata.csv:%d' % (row[2], object['line_num']))
         logger.debug(object)
         objects.append(object)
     return objects
@@ -103,15 +216,66 @@ def create_objects(objects, zip, client):
         logger.debug(pretty.pformat(object))
         obj = client.createObject(pid, label=unicode(object['title']))
 
-        for file in object['files']:
-            #file_handle = zip.open(file)
-            mime,encoding = mimetypes.guess_type(file)
-            logger.debug(mime)
-            obj.addDataStream(file, zip.read(file), label=unicode(file), mimeType=unicode(mime), controlGroup=u'M')
-        
-        obj.addDataStream('METADATA', pretty.pformat(object), mimeType=u'text/plain', controlGroup=u'M')
-        logger.debug('finished processing')
+        if('RELS-EXT' not in obj):
+            obj.addDataStream('RELS-EXT', label=u'Object Relationship Metadata')
+        rels = obj['RELS-EXT']
 
+        # add collection relation
+        rels[NS.fedora.isMemberOfCollection].append({'value' : u'info:fedora/%s' % object['collection'],'type' : u'uri'})
+
+        if object['model'] == 'document':
+            rels[NS.fedoramodel.hasModel].append({'value' : u'info:fedora/jwa:documentCModel', 'type' : u'uri'})
+            datastreams = []
+            for index, file in enumerate(object['files']):
+                datastream = {}
+                mime,encoding = mimetypes.guess_type(file)
+                datastream['index'] = index
+                datastream['file'] = file
+                datastream['mime'] = mime
+                if index == 0:
+                    datastream['dsid'] = 'ORIGINAL'
+                else:
+                    datastream['dsid'] = mangle_dsid(file)
+                datastreams.append(datastream)
+
+        elif object['model'] == 'image':
+            rels[NS.fedoramodel.hasModel].append({'value' : u'info:fedora/jwa:imageCModel', 'type' : u'uri'})
+            datastreams = []
+            for index, file in enumerate(object['files']):
+                datastream = {}
+                mime,encoding = mimetypes.guess_type(file)
+                datastream['index'] = index
+                datastream['file'] = file
+                datastream['mime'] = mime
+                if index == 0:
+                    datastream['dsid'] = 'ORIGINAL'
+                else:
+                    datastream['dsid'] = mangle_dsid(file)
+                datastreams.append(datastream)
+
+        elif object['model'] == 'audio':
+            rels[NS.fedoramodel.hasModel].append({'value' : u'info:fedora/jwa:audioCModel', 'type'  : u'uri'})
+            datastreams = []
+            for index, file in enumerate(object['files']):
+                datastream = {}
+                mime,encoding = mimetypes.guess_type(file)
+                datastream['index'] = index
+                datastream['file'] = file
+                datastream['mime'] = mime
+                datastream['dsid'] = mangle_dsid(file)
+                datastreams.append(datastream)
+            playlist = create_playlist(datastreams, pid)
+            obj.addDataStream('PLAYLIST', playlist, label=u'Playlist XML file', mimeType=u'text/xml', controlGroup=u'M')
+
+        rels.setContent()
+
+        for ds in datastreams:
+            obj.addDataStream(ds['dsid'], zip.read(ds['file']), label=unicode(ds['file']), mimeType=unicode(ds['mime']), controlGroup=u'M')
+        
+        obj.addDataStream('METADATA', pretty.pformat(object), mimeType=u'text/plain', controlGroup=u'M', label=u'JSON Metadata')
+        obj.addDataStream('MODS', create_mods(object), mimeType=u'text/xml', controlGroup=u'M', label=u'Mods Metadata')
+        logger.debug('finished processing')
+        logger.info('Created Object: %(pid)s. Title: %(title)s.' % {'pid' : pid, 'title' : object['title']})
 
 if __name__ == '__main__':
     # register handlers so we properly disconnect and reconnect
@@ -183,7 +347,7 @@ if __name__ == '__main__':
 
     # setup a fedora connection
     try:
-        fc = FedoraConnection(repository_url, username = repository_user, password = repository_pass)
+        fc = FedoraConnection(repository_url, username = repository_user, password = repository_pass, persistent=False)
         client = FedoraClient(fc)
     except Exception:
         logger.debug('Error connecting. URL: %s Username: %s Password: %s.' % (repository_url, repository_user, repository_pass));
