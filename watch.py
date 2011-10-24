@@ -161,16 +161,6 @@ def validate_metadata(metadata_handle, zipfile, zip_name):
         object['title'] = row[1]
         if(string.strip(row[2])):
             object['relation'] = row[2].split(' ')
-            if len(object['relation']) != 3:
-                raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
-            if object['relation'][0] not in object['files']:
-                logger.debug(object['relation'][0])
-                logger.debug(object['files'])
-                raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
-            #if object['relation'][2] not in object['files']:
-            #    logger.debug(object['relation'][2])
-            #    logger.debug(object['files'])
-            #    raise WatcherException('Metadata validation failure. Relation: %s is not valid. metadata.csv:%d' % (row[2], object['line_num']))
         else:
             object['relation'] = ''
         object['subjects'] = row[3].split(';')
@@ -229,6 +219,8 @@ def create_objects(objects, zip, client):
             for index, file in enumerate(object['files']):
                 datastream = {}
                 mime,encoding = mimetypes.guess_type(file)
+                if mime == None:
+                    mime = 'application/octet-stream'
                 datastream['index'] = index
                 datastream['file'] = file
                 datastream['mime'] = mime
